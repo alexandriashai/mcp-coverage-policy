@@ -186,6 +186,15 @@ async def coverage_policy_search(
                     lines.append(f"- **{r['title']}** ({r['publication_date']}) [Doc #{r['document_number']}]({r['html_url']})")
                 sections.append("\n".join(lines))
 
+    if scope in ("all",):
+        # Search CMS Coverage Database for NCDs
+        ncds = await cms_coverage.search_ncds(topic)
+        if ncds:
+            lines = ["### CMS National Coverage Determinations\n"]
+            for n in ncds[:5]:
+                lines.append(f"- **NCD {n['ncd_id']}:** {n['title']}")
+            sections.append("\n".join(lines))
+
     if not sections:
         return f"No coverage policies found for: {topic}"
 

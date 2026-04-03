@@ -35,6 +35,12 @@ async def cfr_search(q: str = Query(...), title: str = Query(""), limit: int = Q
     return await ecfr.search_regulations(q, title, limit)
 
 
+@app.get("/cfr/section")
+async def cfr_section(title: str = Query(...), part: str = Query(...), section: str = Query(...)):
+    result = await ecfr.get_section(title, part, section)
+    return result or {"error": "Section not found"}
+
+
 @app.get("/federal-register/search")
 async def fr_search(
     q: str = Query(...),
