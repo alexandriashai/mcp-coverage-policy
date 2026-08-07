@@ -1,6 +1,9 @@
 """MCP Server for Coverage Policy — eCFR, Federal Register, CMS Coverage Database."""
 
+import re
+
 from mcp.server.fastmcp import FastMCP
+
 from .services import ecfr, federal_register, cms_coverage
 
 mcp = FastMCP(
@@ -11,6 +14,61 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8121,
 )
+
+
+@mcp.resource("docs://about")
+async def about() -> str:
+    """About this MCP server and its data sources."""
+    return (
+        "Coverage Policy Search MCP Server\n\n"
+        "Search federal regulations, CMS coverage policies, and Federal Register "
+        "rulemaking for insurance coverage arguments.\n\n"
+        "Data Sources:\n"
+        "- eCFR (Electronic Code of Federal Regulations): Full text of federal regulations\n"
+        "- Federal Register: Proposed and final rules, notices\n"
+        "- CMS Coverage Database: National Coverage Determinations (NCDs)\n\n"
+        "CFR Titles Covered:\n"
+        "- 42 CFR: Medicare/Medicaid regulations\n"
+        "- 29 CFR: ERISA (Employee Retirement Income Security Act)\n"
+        "- 45 CFR: ACA (Affordable Care Act) regulations\n"
+        "- 26 CFR: Tax code (health coverage related)\n\n"
+        "Tools:\n"
+        "- search_cfr: Search the Code of Federal Regulations\n"
+        "- get_cfr_section: Get full text of a specific CFR section\n"
+        "- search_federal_register: Search Federal Register documents\n"
+        "- get_federal_register_document: Get full FR document details\n"
+        "- lookup_ncd: Look up a National Coverage Determination by ID\n"
+        "- coverage_policy_search: Comprehensive cross-source coverage search\n"
+    )
+
+
+@mcp.prompt()
+async def coverage_denial_research(treatment: str = "gender affirming care", regulation_area: str = "ACA") -> str:
+    """Research the regulatory basis for a coverage denial of a specific treatment."""
+    return (
+        f"Research the federal regulatory basis for coverage of {treatment} under {regulation_area}.\n\n"
+        f"1. Use coverage_policy_search with topic='{treatment}' to find relevant "
+        f"regulations, Federal Register rules, and NCDs\n"
+        f"2. Search CFR with search_cfr query='{treatment}' to find specific regulatory sections\n"
+        f"3. Check the Federal Register for recent rulemaking with "
+        f"search_federal_register query='{treatment}' doc_type='RULE'\n\n"
+        f"Identify which regulations support or mandate coverage of {treatment}."
+    )
+
+
+@mcp.prompt()
+async def ncd_lcd_lookup(procedure: str = "CPAP therapy", ncd_id: str = "") -> str:
+    """Look up National Coverage Determinations for a medical procedure."""
+    return (
+        f"Research CMS coverage policy for {procedure}.\n\n"
+        + (f"1. Look up NCD {ncd_id} with lookup_ncd\n" if ncd_id else
+           f"1. Use coverage_policy_search with topic='{procedure}' scope='all'\n")
+        + f"2. Search 42 CFR for related Medicare regulations with "
+        f"search_cfr query='{procedure}' title='42'\n"
+        f"3. Check for recent Federal Register rules with "
+        f"search_federal_register query='{procedure}' agency='cms' doc_type='RULE'\n\n"
+        f"Summarize the coverage criteria and any recent policy changes."
+    )
 
 
 @mcp.tool()
@@ -132,6 +190,29 @@ async def get_federal_register_document(document_number: str) -> str:
     return "\n".join(lines)
 
 
+def _readable(raw: str) -> str:
+    """
+    Un-mangle CMS's field text.
+
+    The coverage API returns HTML that has been entity-escaped TWICE and with
+    slashes escaped as `&sol;`, so a clause arrives as
+    `&lt;p&gt;Gender reassignment&lt;&sol;p&gt;`. Rendered as-is it is unreadable,
+    which matters here because the substantive coverage rule lives in exactly
+    these fields — the whole point of the tool is the prose in section D.
+    """
+    import html
+    t = raw.replace("&sol;", "/")
+    for _ in range(3):                    # escaped twice; a third pass is a no-op
+        new = html.unescape(t)
+        if new == t:
+            break
+        t = new
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.I)
+    t = re.sub(r"</p\s*>", "\n", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)          # tags carry no meaning once flattened
+    t = re.sub(r"[ \t\xa0]+", " ", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
 @mcp.tool()
 async def lookup_ncd(ncd_id: str) -> str:
     """Look up a National Coverage Determination (NCD) by ID from the CMS Coverage Database.
@@ -145,8 +226,8 @@ async def lookup_ncd(ncd_id: str) -> str:
 
     lines = [f"## NCD {ncd_id}"]
     for key, value in result.items():
-        if value and isinstance(value, str) and len(value) < 2000:
-            lines.append(f"**{key}:** {value}")
+        if value and isinstance(value, str) and len(value) < 4000:
+            lines.append(f"**{key}:** {_readable(value)}")
     return "\n".join(lines)
 
 

@@ -3,7 +3,30 @@
 import httpx
 
 BASE_URL = "https://www.ecfr.gov/api"
-_client = httpx.AsyncClient(timeout=15.0)
+# eCFR's versioner returns whole-title XML and is genuinely slow — 15s produced
+# httpx.ReadTimeout on 45 CFR 147.212 and friends, surfacing to callers as a bare
+# 500 with no hint that the cause was a deadline rather than a bad section number.
+_client = httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0))
+
+
+async def _get_with_retry(url: str, params: dict | None = None, attempts: int = 3):
+    """
+    GET with backoff. eCFR both rate-limits this host and is slow enough to trip
+    a deadline on a cold cache, and both failure modes are transient — retrying
+    turns an intermittent 500 into a result rather than into a wrong conclusion
+    about the regulation not existing.
+    """
+    import asyncio
+
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await _client.get(url, params=params)
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
+            last = e
+            if i < attempts - 1:
+                await asyncio.sleep(2 ** i)
+    raise last
 
 # Insurance-critical CFR titles
 INSURANCE_TITLES = {
@@ -96,10 +119,10 @@ async def get_section(title: str, part: str, section: str) -> dict | None:
 
     # Versioner API with date and full section identifier
     versioner_url = f"{BASE_URL}/versioner/v1/full/{date}/title-{title}.xml"
-    resp = await _client.get(versioner_url, params={"part": part, "section": full_section})
+    resp = await _get_with_retry(versioner_url, {"part": part, "section": full_section})
     if resp.status_code != 200:
         # Try with just the section number (without part prefix)
-        resp = await _client.get(versioner_url, params={"part": part, "section": section})
+        resp = await _get_with_retry(versioner_url, {"part": part, "section": section})
 
     if resp.status_code == 200 and not resp.text.strip().startswith('<?xml version="1.0"?>\n<hash>'):
         text = re.sub(r'<[^>]+>', ' ', resp.text)
@@ -108,7 +131,12 @@ async def get_section(title: str, part: str, section: str) -> dict | None:
             "title": title,
             "part": part,
             "section": section,
+            # Truncation is REPORTED, not silent. An 8000-char slice of a long
+            # section reads exactly like a short section that ended, so a caller
+            # quoting this text would present a partial rule as the whole rule.
             "content": text[:8000],
+            "truncated": len(text) > 8000,
+            "full_length": len(text),
             "url": f"https://www.ecfr.gov/current/title-{title}/section-{full_section}",
         }
 
